@@ -1,167 +1,155 @@
-import os
-import json
-import uuid
-import base64
+import os, json, uuid
 from datetime import datetime
-from typing import List, Dict, Any, Optional
-
 import pandas as pd
 import streamlit as st
 
 from vision_extract import extract_props_from_images
-from slip_logic import (
-    filter_props,
-    score_props_simple,
-    build_primary_slip_aggression_1,
-    recommend_stake_aggression_1,
-)
+from slip_logic import filter_props, score_props, build_recommendation_aggression1
 from tracking import (
-    load_history,
-    append_slip_to_history,
-    update_slip_result,
-    history_download_button,
+    load_slips, load_props, save_slip, save_props,
+    update_slip_result, update_prop_result, download_buttons
 )
 
-APP_TITLE = "Prop + Slip (iPhone) — Bankroll Builder"
+st.set_page_config(page_title="PP Bankroll Builder (iPhone)", layout="wide")
+st.title("PP Bankroll Builder (iPhone) — Aggression 1 (Bankroll Mode)")
+st.caption("PrizePicks $5 minimum enforced • $20 bankroll = one $5 slip/day • 2-pick flex only until $85+")
 
-st.set_page_config(page_title=APP_TITLE, layout="wide")
-st.title(APP_TITLE)
-st.caption("Upload PrizePicks prop screenshots → extract props → pick More/Less → build slips → track results.")
-
-# --- Sidebar controls ---
+# Sidebar
 st.sidebar.header("Daily Inputs")
-
-bankroll = st.sidebar.number_input("Current Bankroll ($)", min_value=0.0, value=20.0, step=1.0)
-aggression = st.sidebar.selectbox("Aggression Level", options=[1, 2, 3], index=0)
+bankroll = st.sidebar.number_input("Bankroll ($)", min_value=0.0, value=20.0, step=1.0)
 sports_allowed = st.sidebar.multiselect(
     "Sports allowed today",
-    options=["NBA", "WNBA", "NFL", "MLB", "NHL", "SOCCER", "TENNIS", "CBB", "OTHER"],
-    default=["NBA"],
+    ["NBA","WNBA","NFL","MLB","NHL","SOCCER","TENNIS","CBB","OTHER"],
+    default=["NBA"]
 )
-
-demons_blocked = st.sidebar.checkbox("Block Demons (recommended)", value=True)
-max_screenshots = st.sidebar.slider("Max screenshots to upload", min_value=1, max_value=20, value=10)
+demons_blocked = st.sidebar.checkbox("Block Demons", value=True)
 
 st.sidebar.divider()
-st.sidebar.subheader("Tracking")
-st.sidebar.write("You can log results after games. The app will learn from your history.")
+st.sidebar.subheader("PrizePicks rule")
+st.sidebar.write("Minimum bet is $5. With $20 bankroll, app will recommend at most one $5 slip/day.")
 
-# --- Upload screenshots ---
-st.header("1) Upload prop screenshots")
-uploads = st.file_uploader(
-    "Upload 1–10 screenshots (PNG/JPG).",
-    type=["png", "jpg", "jpeg", "webp"],
-    accept_multiple_files=True,
-)
+# Uploads
+st.header("1) Upload 1–10 prop screenshots")
+uploads = st.file_uploader("Upload screenshots", type=["png","jpg","jpeg","webp"], accept_multiple_files=True)
 
-if uploads and len(uploads) > max_screenshots:
-    st.warning(f"You uploaded {len(uploads)} files. Only first {max_screenshots} will be used.")
-    uploads = uploads[:max_screenshots]
+if uploads and len(uploads) > 10:
+    st.warning("Max 10 uploads at a time. Using first 10.")
+    uploads = uploads[:10]
 
-# --- Extract ---
-extracted: List[Dict[str, Any]] = []
+# Extract
+props = []
 if uploads:
     if not os.getenv("OPENAI_API_KEY") and not st.secrets.get("OPENAI_API_KEY", None):
-        st.error("Missing OPENAI_API_KEY. Add it in Streamlit secrets.")
+        st.error("Missing OPENAI_API_KEY. Add it in Streamlit Cloud → Settings → Secrets.")
         st.stop()
 
-    with st.spinner("Reading screenshots (vision) and extracting props…"):
-        extracted = extract_props_from_images(uploads)
+    with st.spinner("Extracting props from screenshots…"):
+        props = extract_props_from_images(uploads)
 
-    st.success(f"Extracted {len(extracted)} prop(s) from screenshots.")
-
-# --- Review extracted props ---
 st.header("2) Review extracted props (edit if needed)")
-if extracted:
-    df = pd.DataFrame(extracted)
-    # Friendly order
-    cols = [c for c in ["sport", "player", "team", "opponent", "market", "line", "alt_line", "is_demon", "is_goblin", "game_time"] if c in df.columns]
-    df = df[cols + [c for c in df.columns if c not in cols]]
-
-    edited_df = st.data_editor(
-        df,
-        use_container_width=True,
-        num_rows="dynamic",
-        key="props_editor",
-    )
+if props:
+    df = pd.DataFrame(props)
+    edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic")
     props = edited_df.to_dict(orient="records")
 else:
-    props = []
+    st.info("Upload screenshots to start.")
+    st.stop()
 
-# --- Filter and score ---
-st.header("3) Build slips")
-if props:
-    props = filter_props(
-        props,
-        sports_allowed=sports_allowed,
-        demons_blocked=demons_blocked,
-    )
-    scored = score_props_simple(props)
+# Build
+st.header("3) Recommendation (PLAY vs SKIP)")
+filtered = filter_props(props, sports_allowed=sports_allowed, demons_blocked=demons_blocked)
+scored = score_props(filtered)
 
-    st.subheader("Top props (ranked)")
-    scored_df = pd.DataFrame(scored).sort_values(by="score", ascending=False)
-    st.dataframe(scored_df, use_container_width=True, height=320)
+st.subheader("Ranked board")
+st.dataframe(pd.DataFrame(scored).sort_values("score", ascending=False), use_container_width=True, height=360)
 
-    if aggression != 1:
-        st.info("Aggression 2/3 logic can be added next. Right now slips are tuned for Aggression=1 (safer).")
+rec = build_recommendation_aggression1(scored, bankroll=float(bankroll))
 
-    primary_slip = build_primary_slip_aggression_1(scored)
-    stake_primary, stake_secondary = recommend_stake_aggression_1(bankroll)
+if rec["action"] == "SKIP":
+    st.error(f"SKIP: {rec['reason']}")
+else:
+    st.success(f"PLAY: {rec['slip_type']} • Stake: ${rec['stake']:.2f}")
+    st.write(rec["reason"])
+    st.json(rec)
 
-    st.subheader("Primary Slip (Aggression=1)")
-    st.write("Default: **3-pick Flex** (demons blocked unless you toggle them on).")
-    st.json(primary_slip)
-
-    st.subheader("Stake recommendation")
-    st.write(f"Primary slip stake: **${stake_primary:.2f}**")
-    st.write(f"Optional secondary slip stake: **${stake_secondary:.2f}** (only if you want a 2nd card)")
-
-    # Save slip to history
-    if st.button("✅ Save today’s slip to History", type="primary"):
+    if st.button("✅ Save slip + legs to tracking", type="primary"):
         slip_id = str(uuid.uuid4())[:8]
-        payload = {
+        created_at = datetime.utcnow().isoformat()
+
+        # Save slip
+        save_slip({
             "slip_id": slip_id,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": created_at,
             "bankroll": bankroll,
-            "aggression": aggression,
-            "demons_blocked": demons_blocked,
-            "sports_allowed": ",".join(sports_allowed),
-            "stake_primary": float(stake_primary),
-            "stake_secondary": float(stake_secondary),
-            "primary_slip_json": json.dumps(primary_slip),
-            "result": "",  # W / L / PARTIAL later
+            "aggression": 1,
+            "stake": rec["stake"],
+            "slip_type": rec["slip_type"],
+            "action": rec["action"],
+            "reason": rec.get("reason",""),
+            "result": "",
             "payout": "",
             "notes": "",
-        }
-        append_slip_to_history(payload)
-        st.success(f"Saved to History. Slip ID: {slip_id}")
+            "legs_json": json.dumps(rec["legs"]),
+        })
 
-# --- History / tracking ---
-st.header("4) Track results")
-hist = load_history()
+        # Save legs as prop rows
+        leg_rows = []
+        for i, leg in enumerate(rec["legs"], start=1):
+            prop_id = f"{slip_id}-{i}"
+            leg_rows.append({
+                "slip_id": slip_id,
+                "prop_id": prop_id,
+                "created_at": created_at,
+                "player": leg.get("player",""),
+                "market": leg.get("market",""),
+                "side": leg.get("recommended",""),
+                "line": leg.get("line",""),
+                "score": leg.get("score",""),
+                "result": "",  # set later
+            })
+        save_props(leg_rows)
 
-if hist.empty:
-    st.info("No history yet. Save a slip above to start tracking.")
+        st.success(f"Saved! Slip ID: {slip_id}")
+
+st.header("4) Track results (Prop + Slip)")
+slips_df = load_slips()
+props_df = load_props()
+
+if slips_df.empty:
+    st.info("No saved slips yet.")
 else:
-    st.dataframe(hist.sort_values("created_at", ascending=False), use_container_width=True)
+    st.subheader("Slip history")
+    st.dataframe(slips_df.sort_values("created_at", ascending=False), use_container_width=True)
 
-    st.subheader("Update a slip result")
-    col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+    st.subheader("Update slip result")
+    c1, c2, c3, c4 = st.columns([1,1,1,2])
+    with c1:
+        slip_id_in = st.text_input("Slip ID")
+    with c2:
+        slip_result = st.selectbox("Slip Result", ["", "W", "L", "PARTIAL"])
+    with c3:
+        payout = st.text_input("Payout ($)")
+    with c4:
+        notes = st.text_input("Notes")
 
-    with col1:
-        slip_id = st.text_input("Slip ID", value="")
-    with col2:
-        result = st.selectbox("Result", options=["", "W", "L", "PARTIAL"], index=0)
-    with col3:
-        payout = st.text_input("Payout ($)", value="")
-    with col4:
-        notes = st.text_input("Notes", value="")
+    if st.button("Update Slip"):
+        update_slip_result(slip_id_in.strip(), slip_result, payout, notes)
+        st.success("Slip updated (refresh if needed).")
 
-    if st.button("Update Result"):
-        if not slip_id:
-            st.error("Enter a Slip ID.")
-        else:
-            update_slip_result(slip_id=slip_id.strip(), result=result, payout=payout, notes=notes)
-            st.success("Updated. Refresh the page to see changes.")
+    st.subheader("Prop legs (per slip) + update prop results")
+    st.dataframe(props_df.sort_values("created_at", ascending=False), use_container_width=True)
 
-    history_download_button()
+    c5, c6, c7 = st.columns([1,1,1])
+    with c5:
+        slip_id_leg = st.text_input("Slip ID (for leg)")
+    with c6:
+        prop_id_leg = st.text_input("Prop ID (example: ab12cd34-1)")
+    with c7:
+        prop_res = st.selectbox("Prop Result", ["", "WIN", "LOSS", "PUSH", "DNP"])
+
+    if st.button("Update Prop"):
+        update_prop_result(slip_id_leg.strip(), prop_id_leg.strip(), prop_res)
+        st.success("Prop updated (refresh if needed).")
+
+    st.subheader("Backups")
+    download_buttons()
