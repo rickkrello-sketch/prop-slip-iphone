@@ -41,6 +41,9 @@ def save_props(rows: list):
 
 def update_slip_result(slip_id: str, result: str, payout: str, notes: str):
     df = load_slips()
+    if df.empty:
+        st.error("No slips yet.")
+        return
     mask = df["slip_id"].astype(str) == str(slip_id)
     if not mask.any():
         st.error("Slip ID not found.")
@@ -52,6 +55,9 @@ def update_slip_result(slip_id: str, result: str, payout: str, notes: str):
 
 def update_prop_result(slip_id: str, prop_id: str, result: str):
     df = load_props()
+    if df.empty:
+        st.error("No props yet.")
+        return
     mask = (df["slip_id"].astype(str) == str(slip_id)) & (df["prop_id"].astype(str) == str(prop_id))
     if not mask.any():
         st.error("Prop ID not found for that slip.")
