@@ -1,3 +1,4 @@
+import os
 import json
 import uuid
 from datetime import datetime
@@ -47,6 +48,24 @@ st.sidebar.header("Daily Inputs")
 bankroll = st.sidebar.number_input("Bankroll ($)", min_value=0.0, value=20.0, step=1.0)
 aggression = st.sidebar.selectbox("Aggression", options=[1], index=0)
 demons_blocked = st.sidebar.checkbox("Block Demons", value=True)
+
+st.sidebar.divider()
+st.sidebar.subheader("Maintenance")
+
+if st.sidebar.button("🧹 RESET ALL TRACKING (Day 1 reset)"):
+    # Delete local CSVs if they exist
+    for f in ["slips_history.csv", "props_history.csv"]:
+        try:
+            if os.path.exists(f):
+                os.remove(f)
+        except Exception:
+            pass
+
+    # Clear today's in-memory state too
+    st.session_state.board = []
+    st.session_state.today_slips_saved = 0
+    st.sidebar.success("Tracking reset complete. Refreshing…")
+    st.rerun()
 
 st.sidebar.divider()
 st.sidebar.subheader("LOCKED RULES (Aggression 1)")
@@ -138,18 +157,19 @@ with colA:
         st.rerun()
 
 with colB:
-    if st.button("⬇️ Download board JSON"):
-        payload = {
-            "saved_at": now_iso(),
-            "bankroll": bankroll,
-            "board": st.session_state.board,
-        }
-        st.download_button(
-            "Tap to download",
-            data=json.dumps(payload, indent=2).encode("utf-8"),
-            file_name="pp_board_backup.json",
-            mime="application/json",
-        )
+    # NOTE: download button must be called unconditionally, so we create it here safely
+    payload = {
+        "saved_at": now_iso(),
+        "bankroll": bankroll,
+        "board": st.session_state.board,
+    }
+    st.download_button(
+        "⬇️ Download board JSON",
+        data=json.dumps(payload, indent=2).encode("utf-8"),
+        file_name="pp_board_backup.json",
+        mime="application/json",
+        disabled=(len(st.session_state.board) == 0),
+    )
 
 # -------------------------
 # Step 2 — Score board
@@ -187,11 +207,9 @@ if st.session_state.board:
             st.markdown(f"### Slip {idx}: {slip['slip_type']} — Stake **${slip['stake']:.2f}**")
             st.dataframe(pd.DataFrame(slip["legs"]), use_container_width=True, height=220)
 
-        # Save slips + legs to tracking
         if st.button("✅ Save recommended slip(s) to tracking", type="primary"):
             created_at = now_iso()
 
-            # Save each slip and its legs
             for slip in rec["slips"]:
                 slip_id = str(uuid.uuid4())[:8]
                 save_slip({
